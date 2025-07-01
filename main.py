@@ -284,3 +284,207 @@ def require_role(required_role: UserRole):
     return role_checker
 
 
+
+# External service mocks
+class ExternalUserService:
+    @staticmethod
+    async def get_user(user_id: str) -> Dict[str, Any]:
+        await asyncio.sleep(0.1)  # Simulate API delay
+        return {
+            "id": user_id,
+            "email": f"user{user_id}@example.com",
+            "full_name": f"User {user_id}",
+            "status": "active"
+        }
+    
+    @staticmethod
+    async def create_user(user_data: Dict[str, Any]) -> Dict[str, Any]:
+        await asyncio.sleep(0.2)
+        return {"id": f"ext_{int(time.time())}", **user_data}
+
+class ExternalPaymentService:
+    @staticmethod
+    async def get_subscription(org_id: str) -> Dict[str, Any]:
+        await asyncio.sleep(0.1)
+        return {
+            "org_id": org_id,
+            "plan": "premium",
+            "status": "active",
+            "next_billing": "2024-02-01"
+        }
+
+class ExternalCommunicationService:
+    @staticmethod
+    async def send_notification(recipient: str, message: str) -> Dict[str, Any]:
+        await asyncio.sleep(0.1)
+        return {
+            "recipient": recipient,
+            "status": "sent",
+            "message_id": f"msg_{int(time.time())}"
+        }
+
+
+# Async webhook processor
+class WebhookProcessor:
+    @staticmethod
+    async def process_webhook(webhook_id: int):
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        
+        # Get webhook
+        cursor.execute('SELECT * FROM webhooks WHERE id = ?', (webhook_id,))
+        webhook = cursor.fetchone()
+        
+        if not webhook:
+            conn.close()
+            return
+        
+        # Update status to processing
+        cursor.execute(
+            'UPDATE webhooks SET status = ?, processed_at = CURRENT_TIMESTAMP WHERE id = ?',
+            (WebhookStatus.PROCESSING, webhook_id)
+        )
+        conn.commit()
+        
+        try:
+            # Process based on event type
+            payload = json.loads(webhook[3])  # payload column
+            event_type = webhook[2]  # event_type column
+            org_id = webhook[1]  # organization_id column
+            
+            if event_type == "user.created":
+                await WebhookProcessor._handle_user_created(org_id, payload)
+            elif event_type == "payment.subscription_updated":
+                await WebhookProcessor._handle_subscription_updated(org_id, payload)
+            elif event_type == "communication.email_status":
+                await WebhookProcessor._handle_email_status(org_id, payload)
+            
+            # Mark as successful
+            cursor.execute(
+                'UPDATE webhooks SET status = ? WHERE id = ?',
+                (WebhookStatus.SUCCESS, webhook_id)
+            )
+            conn.commit()
+            
+        except Exception as e:
+            # Handle failure with retry logic
+            retry_count = webhook[5] + 1  # retry_count column
+            max_retries = webhook[6]  # max_retries column
+            
+            if retry_count < max_retries:
+                next_retry = datetime.now() + timedelta(minutes=2 ** retry_count)
+                cursor.execute('''
+                    UPDATE webhooks 
+                    SET status = ?, retry_count = ?, next_retry = ?, error_message = ?
+                    WHERE id = ?
+                ''', (WebhookStatus.RETRY, retry_count, next_retry, str(e), webhook_id))
+            else:
+                cursor.execute('''
+                    UPDATE webhooks 
+                    SET status = ?, error_message = ?
+                    WHERE id = ?
+                ''', (WebhookStatus.FAILED, str(e), webhook_id))
+            
+            conn.commit()
+            print(f"Webhook {webhook_id} failed: {e}")
+        
+        finally:
+            conn.close()
+    
+    @staticmethod
+    async def _handle_user_created(org_id: int, payload: Dict[str, Any]):
+        # Sync external user data
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO external_users 
+            (organization_id, external_id, email, full_name, status, last_sync)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (
+            org_id, payload.get("user_id"), payload.get("email"),
+            payload.get("full_name"), payload.get("status", "active")
+        ))
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    async def _handle_subscription_updated(org_id: int, payload: Dict[str, Any]):
+        # Log subscription change
+        print(
+            org_id, None, "subscription_updated", "subscription",
+            str(org_id), payload
+        )
+    
+    @staticmethod
+    async def _handle_email_status(org_id: int, payload: Dict[str, Any]):
+        # Log email delivery status
+        print(
+            org_id, None, "email_status_updated", "communication",
+            payload.get("message_id"), payload
+        )
+
+# Background task for processing webhooks
+async def process_pending_webhooks():
+    while True:
+        try:
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id FROM webhooks 
+                WHERE status = 'pending' OR (status = 'retry' AND next_retry <= CURRENT_TIMESTAMP)
+                ORDER BY created_at ASC
+                LIMIT 10
+            ''')
+            webhooks = cursor.fetchall()
+            conn.close()
+            
+            tasks = [WebhookProcessor.process_webhook(webhook[0]) for webhook in webhooks]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            
+            await asyncio.sleep(5)  # Check every 5 seconds
+        except Exception as e:
+            print(f"Error in webhook processor: {e}")
+            await asyncio.sleep(10)
+
+# Health monitoring
+async def monitor_integrations():
+    services = [
+        ("user_service", "https://api.userservice.com/health"),
+        ("payment_service", "https://api.paymentservice.com/health"),
+        ("communication_service", "https://api.commservice.com/health")
+    ]
+    
+    while True:
+        try:
+            async with httpx.AsyncClient() as client:
+                for service_name, health_url in services:
+                    try:
+                        start_time = time.time()
+                        response = await client.get(health_url, timeout=5.0)
+                        response_time = int((time.time() - start_time) * 1000)
+                        
+                        status = IntegrationStatus.HEALTHY if response.status_code == 200 else IntegrationStatus.DEGRADED
+                        error_msg = None if response.status_code == 200 else f"HTTP {response.status_code}"
+                        
+                    except Exception as e:
+                        status = IntegrationStatus.DOWN
+                        response_time = None
+                        error_msg = str(e)
+                    
+                    # Update health status
+                    conn = db.get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO integration_health 
+                        (service_name, status, last_check, response_time_ms, error_message)
+                        VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)
+                    ''', (service_name, status, response_time, error_msg))
+                    conn.commit()
+                    conn.close()
+            
+            await asyncio.sleep(30)  # Check every 30 seconds
+        except Exception as e:
+            print(f"Error in health monitor: {e}")
+            await asyncio.sleep(60)
+
