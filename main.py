@@ -590,3 +590,46 @@ async def login(request: Request, email: str, password: str, organization_id: in
     
     
     return TokenResponse(access_token=access_token, token_type="bearer")
+# Organization endpoints
+@app.post("/organizations", response_model=OrganizationResponse)
+@limiter.limit("3/minute")
+async def create_organization(request: Request, org_data: OrganizationCreate):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            INSERT INTO organizations (name, domain)
+            VALUES (?, ?)
+        ''', (org_data.name, org_data.domain))
+        
+        org_id = cursor.lastrowid
+        cursor.execute('SELECT * FROM organizations WHERE id = ?', (org_id,))
+        org = cursor.fetchone()
+        conn.commit()
+        
+        return OrganizationResponse(
+            id=org[0], name=org[1], domain=org[2],
+            created_at=org[3], is_active=org[4]
+        )
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Domain already exists")
+    finally:
+        conn.close()
+
+@app.get("/organizations/me", response_model=OrganizationResponse)
+async def get_my_organization(current_user: dict = Depends(get_current_user)):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM organizations WHERE id = ?', (current_user["organization_id"],))
+    org = cursor.fetchone()
+    conn.close()
+    
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    
+    return OrganizationResponse(
+        id=org[0], name=org[1], domain=org[2],
+        created_at=org[3], is_active=org[4]
+    )
