@@ -488,3 +488,43 @@ async def monitor_integrations():
             print(f"Error in health monitor: {e}")
             await asyncio.sleep(60)
 
+
+# FastAPI app setup
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start background tasks
+    webhook_task = asyncio.create_task(process_pending_webhooks())
+    health_task = asyncio.create_task(monitor_integrations())
+    
+    try:
+        yield
+    finally:
+        webhook_task.cancel()
+        health_task.cancel()
+        try:
+            await webhook_task
+            await health_task
+        except asyncio.CancelledError:
+            pass
+
+app = FastAPI(
+    title="Multi-Tenant SaaS Platform",
+    description="A comprehensive SaaS platform with external integrations",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+
