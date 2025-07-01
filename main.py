@@ -238,7 +238,7 @@ def verify_token(token: str) -> dict:
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.JWTError:
+    except Exception as E:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # Tenant isolation utilities
@@ -794,3 +794,5 @@ async def get_subscription_status(current_user: dict = Depends(get_current_user)
         return subscription
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"External API error: {str(e)}")
+
+
