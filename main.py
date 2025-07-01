@@ -722,3 +722,43 @@ async def update_user(
         role=updated_user[4], organization_id=updated_user[5],
         created_at=updated_user[6], is_active=updated_user[7]
     )
+
+
+
+# Webhook endpoints
+@app.post("/webhooks/{service_name}")
+@limiter.limit("100/minute")
+async def receive_webhook(
+    service_name: str,
+    payload: WebhookPayload,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    x_signature: Optional[str] = None
+):
+    # Verify webhook signature (simplified)
+    if x_signature:
+        expected_signature = hmac.new(
+            SECRET_KEY.encode(),
+            json.dumps(payload.dict()).encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        if not hmac.compare_digest(f"sha256={expected_signature}", x_signature):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+    
+    # Store webhook for processing
+    # For demo, we'll use organization_id = 1
+    organization_id = 1
+    
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO webhooks (organization_id, event_type, payload, status)
+        VALUES (?, ?, ?, ?)
+    ''', (organization_id, payload.event_type, json.dumps(payload.dict()), WebhookStatus.PENDING))
+    
+    webhook_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    
+    return {"status": "received", "webhook_id": webhook_id}
