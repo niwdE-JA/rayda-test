@@ -633,3 +633,92 @@ async def get_my_organization(current_user: dict = Depends(get_current_user)):
         id=org[0], name=org[1], domain=org[2],
         created_at=org[3], is_active=org[4]
     )
+
+
+@app.get("/users", response_model=List[UserResponse])
+async def get_users(current_user: dict = Depends(require_role(UserRole.ADMIN))):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, email, full_name, role, organization_id, created_at, is_active
+        FROM users WHERE organization_id = ? AND is_active = TRUE
+    ''', (current_user["organization_id"],))
+    users = cursor.fetchall()
+    conn.close()
+    
+    return [
+        UserResponse(
+            id=user[0], email=user[1], full_name=user[2],
+            role=user[3], organization_id=user[4],
+            created_at=user[5], is_active=user[6]
+        ) for user in users
+    ]
+
+@app.get("/users/me", response_model=UserResponse)
+async def get_current_user_info(current_user: dict = Depends(get_current_user)):
+    return UserResponse(
+        id=current_user["id"],
+        email=current_user["email"],
+        full_name=current_user["full_name"],
+        role=current_user["role"],
+        organization_id=current_user["organization_id"],
+        created_at="",  # Would need to fetch from DB
+        is_active=current_user["is_active"]
+    )
+
+@app.put("/users/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: int,
+    user_update: UserUpdate,
+    request: Request,
+    current_user: dict = Depends(require_role(UserRole.ADMIN))
+):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    
+    # Get current user data
+    cursor.execute('''
+        SELECT * FROM users 
+        WHERE id = ? AND organization_id = ? AND is_active = TRUE
+    ''', (user_id, current_user["organization_id"]))
+    user = cursor.fetchone()
+    
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Update fields
+    update_fields = []
+    update_values = []
+    old_values = {"full_name": user[3], "role": user[4]}
+    new_values = {}
+    
+    if user_update.full_name is not None:
+        update_fields.append("full_name = ?")
+        update_values.append(user_update.full_name)
+        new_values["full_name"] = user_update.full_name
+    
+    if user_update.role is not None:
+        update_fields.append("role = ?")
+        update_values.append(user_update.role)
+        new_values["role"] = user_update.role
+    
+    if update_fields:
+        update_values.append(user_id)
+        cursor.execute(f'''
+            UPDATE users SET {', '.join(update_fields)}
+            WHERE id = ?
+        ''', update_values)
+        conn.commit()
+    
+    
+    # Get updated user
+    cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+    updated_user = cursor.fetchone()
+    conn.close()
+    
+    return UserResponse(
+        id=updated_user[0], email=updated_user[1], full_name=updated_user[3],
+        role=updated_user[4], organization_id=updated_user[5],
+        created_at=updated_user[6], is_active=updated_user[7]
+    )
