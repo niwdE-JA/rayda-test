@@ -528,3 +528,65 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
 
+# Authentication endpoints
+@app.post("/auth/register", response_model=UserResponse)
+@limiter.limit("5/minute")
+async def register(request: Request, user_data: UserCreate, organization_id: int):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    
+    # Check if organization exists
+    cursor.execute('SELECT id FROM organizations WHERE id = ? AND is_active = TRUE', (organization_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Organization not found")
+    
+    # Check if user already exists in this organization
+    cursor.execute('SELECT id FROM users WHERE email = ? AND organization_id = ?', (user_data.email, organization_id))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="User already exists in this organization")
+    
+    # Create user
+    password_hash = hash_password(user_data.password)
+    cursor.execute('''
+        INSERT INTO users (email, password_hash, full_name, role, organization_id)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user_data.email, password_hash, user_data.full_name, user_data.role, organization_id))
+    
+    user_id = cursor.lastrowid
+    cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+    user = cursor.fetchone()
+    conn.commit()
+    conn.close()
+    
+    return UserResponse(
+        id=user[0], email=user[1], full_name=user[3],
+        role=user[4], organization_id=user[5],
+        created_at=user[6], is_active=user[7]
+    )
+
+@app.post("/auth/login", response_model=TokenResponse)
+@limiter.limit("10/minute")
+async def login(request: Request, email: str, password: str, organization_id: int):
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT id, password_hash, role FROM users 
+        WHERE email = ? AND organization_id = ? AND is_active = TRUE
+    ''', (email, organization_id))
+    user = cursor.fetchone()
+    conn.close()
+    
+    if not user or not verify_password(password, user[1]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": str(user[0]), "org_id": organization_id, "role": user[2]},
+        expires_delta=access_token_expires
+    )
+    
+    
+    return TokenResponse(access_token=access_token, token_type="bearer")
