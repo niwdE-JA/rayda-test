@@ -762,3 +762,35 @@ async def receive_webhook(
     conn.close()
     
     return {"status": "received", "webhook_id": webhook_id}
+
+
+# External API integration endpoints
+@app.get("/integrations/users/{external_user_id}")
+async def get_external_user(
+    external_user_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    try:
+        user_data = await ExternalUserService.get_user(external_user_id)
+        return user_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"External API error: {str(e)}")
+
+@app.post("/integrations/users")
+async def create_external_user(
+    user_data: Dict[str, Any],
+    current_user: dict = Depends(require_role(UserRole.ADMIN))
+):
+    try:
+        result = await ExternalUserService.create_user(user_data)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"External API error: {str(e)}")
+
+@app.get("/integrations/subscription")
+async def get_subscription_status(current_user: dict = Depends(get_current_user)):
+    try:
+        subscription = await ExternalPaymentService.get_subscription(str(current_user["organization_id"]))
+        return subscription
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"External API error: {str(e)}")
